@@ -1,4 +1,5 @@
 #include "calib.hpp"
+#include "ClipperUtils.hpp"
 #include "GCode/BeltKinematics.hpp"
 #include "BoundingBox.hpp"
 #include "Config.hpp"
@@ -25,6 +26,60 @@
 #include "clonable_ptr.hpp"
 
 namespace Slic3r {
+
+std::vector<std::pair<int, int>> flush_volume_change_sequence(const std::vector<int> &filament_ids)
+{
+    const size_t n = filament_ids.size();
+    if (n < 2)
+        return {};
+
+    // Every node has an edge to every other node, so the next unused edge of a node is just the
+    // next target index, skipping the node itself.
+    std::vector<size_t> next_to(n, 0);
+    std::vector<size_t> stack{0};
+    std::vector<size_t> circuit;
+    circuit.reserve(n * (n - 1) + 1);
+    while (!stack.empty()) {
+        const size_t from = stack.back();
+        if (next_to[from] == from)
+            ++next_to[from];
+        if (next_to[from] < n) {
+            stack.push_back(next_to[from]++);
+        } else {
+            circuit.push_back(from);
+            stack.pop_back();
+        }
+    }
+    std::reverse(circuit.begin(), circuit.end());
+
+    std::vector<std::pair<int, int>> changes;
+    changes.reserve(circuit.size() - 1);
+    for (size_t i = 1; i < circuit.size(); ++i)
+        changes.emplace_back(filament_ids[circuit[i - 1]], filament_ids[circuit[i]]);
+    return changes;
+}
+
+std::vector<Vec2d> flush_volume_grid_cells(const Pointfs &bed_shape, const Polygons &excluded, const Vec2d &footprint, const Vec2d &pitch, double margin)
+{
+    const BoundingBoxf bed_bb(bed_shape);
+    const Polygon      bed_polygon = Polygon::new_scale(bed_shape);
+    const Vec2d        usable      = bed_bb.size() - Vec2d::Constant(2 * margin) - footprint;
+    const int          cols        = usable.x() < 0 ? 0 : int(usable.x() / pitch.x()) + 1;
+    const int          rows        = usable.y() < 0 ? 0 : int(usable.y() / pitch.y()) + 1;
+    const Vec2d        first_cell  = bed_bb.center() - Vec2d((cols - 1) * pitch.x(), (rows - 1) * pitch.y()) / 2;
+
+    std::vector<Vec2d> cells;
+    for (int row = 0; row < rows; ++row)
+        for (int col = 0; col < cols; ++col) {
+            const Vec2d   center = first_cell + Vec2d(col * pitch.x(), row * pitch.y());
+            const Vec2d   lo     = center - footprint / 2;
+            const Vec2d   hi     = center + footprint / 2;
+            const Polygon cell   = Polygon::new_scale({lo, Vec2d(hi.x(), lo.y()), hi, Vec2d(lo.x(), hi.y())});
+            if (diff(cell, bed_polygon).empty() && intersection(Polygons{cell}, excluded).empty())
+                cells.emplace_back(center);
+        }
+    return cells;
+}
 
 // Calculate the optimal Pressure Advance speed
 float CalibPressureAdvance::find_optimal_PA_speed(const DynamicPrintConfig &config, double line_width, double layer_height, int extruder_id, int filament_idx)

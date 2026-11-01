@@ -150,7 +150,8 @@ enum class CalibKind : int
     Cornering, 
     InputShapingFreq, 
     InputShapingDamp,
-    VFA
+    VFA,
+    FlushVolume
 };
 
 class MainFrame : public DPIFrame

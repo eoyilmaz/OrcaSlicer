@@ -18156,6 +18156,153 @@ void Plater::calib_retraction(const Calib_Params& params)
     p->background_process.fff_print()->set_calib_params(params);
 }
 
+bool Plater::calib_flush_volume(const std::vector<int>& filament_ids, double flush_volume, double min_flush)
+{
+    auto show_warning = [](const wxString& msg) {
+        MessageDialog dlg(nullptr, msg, _L("Flushing volume"), wxICON_WARNING | wxOK);
+        dlg.ShowModal();
+    };
+
+    const DynamicPrintConfig full_config = wxGetApp().preset_bundle->full_config();
+    if (full_config.option<ConfigOptionFloats>("nozzle_diameter")->size() != 1) {
+        show_warning(_L("The flushing volume test supports printers with a single nozzle only."));
+        return false;
+    }
+    double angle_rad = 0.;
+    Vec3d  axis      = Vec3d::UnitX();
+    if (belt_calib_rotation_params(angle_rad, axis)) {
+        show_warning(_L("The flushing volume test is not supported on belt printers."));
+        return false;
+    }
+
+    // Raw meshes: the files are loaded without instances, and the base and tower must keep the
+    // shared frame they were modelled in so the tower stays seated on the base.
+    auto load_mesh = [](const std::string& file) {
+        const Model model = Model::read_from_file(Slic3r::resources_dir() + "/calib/flush_volume/" + file, nullptr, nullptr,
+                                                  LoadStrategy::LoadModel);
+        TriangleMesh mesh;
+        for (const ModelObject* object : model.objects)
+            mesh.merge(object->raw_mesh());
+        return mesh;
+    };
+    TriangleMesh base_mesh;
+    TriangleMesh tower_mesh;
+    try {
+        base_mesh  = load_mesh("base.stl");
+        tower_mesh = load_mesh("tower.stl");
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << "Failed to load the flushing volume test model: " << e.what();
+    }
+    if (base_mesh.empty() || tower_mesh.empty()) {
+        show_warning(_L("Failed to load the flushing volume test model."));
+        return false;
+    }
+
+    // The tower sits on the base and has a constant cross-section, so scaling it along Z keeps the
+    // volume per mm of height that the user multiplies the measured gradient height with.
+    const BoundingBoxf3 base_bb      = base_mesh.bounding_box();
+    const BoundingBoxf3 tower_bb     = tower_mesh.bounding_box();
+    const double        tower_height = flush_volume * tower_bb.size().z() / tower_mesh.volume();
+    const double        total_height = base_bb.max.z() + tower_height;
+    const double        max_height   = std::min(full_config.opt_float("extruder_clearance_height_to_rod"), full_config.opt_float("printable_height"));
+    if (total_height > max_height) {
+        // TRN %1% and %2% are heights in mm.
+        show_warning(format_wxstr(_L("The towers would be %1% mm tall, which is more than the %2% mm the extruder clearance and printable height "
+                                     "allow when printing by object. Lower the flushing volume."),
+                                  wxString::FromDouble(total_height, 1), wxString::FromDouble(max_height, 1)));
+        return false;
+    }
+    tower_mesh.translate(0.f, 0.f, -float(tower_bb.min.z()));
+    tower_mesh.scale(Vec3f(1.f, 1.f, float(tower_height / tower_bb.size().z())));
+    tower_mesh.translate(0.f, 0.f, float(base_bb.max.z()));
+
+    // Lay the objects out row by row from the front left corner, as far apart as by-object printing needs.
+    // The skirt is turned off below, so it needs no room.
+    BoundingBoxf footprint(to_2d(base_bb.min), to_2d(base_bb.max));
+    footprint.merge(BoundingBoxf(to_2d(tower_bb.min), to_2d(tower_bb.max)));
+    const Vec2d pitch = footprint.size() + Vec2d::Constant(full_config.opt_float("extruder_clearance_radius") + 1.);
+
+    Polygons excluded;
+    for (const BedExcludeRegion& region : get_bed_excluded_regions(full_config))
+        excluded.emplace_back(region.polygon);
+    const std::vector<Vec2d> cells = flush_volume_grid_cells(full_config.option<ConfigOptionPoints>("printable_area")->values, excluded,
+                                                             footprint.size(), pitch, BED_SHRINK_SEQ_PRINT);
+    if (cells.empty()) {
+        show_warning(_L("The flushing volume test does not fit on the plate with the current extruder clearance radius."));
+        return false;
+    }
+    // Object k prints the base in the filament the tower of object k - 1 ended with, so the only
+    // filament change on a plate is the one under test, at the bottom of each tower.
+    const std::vector<std::pair<int, int>> changes = flush_volume_change_sequence(filament_ids);
+    if ((changes.size() + cells.size() - 1) / cells.size() > PartPlateList::MAX_PLATES_COUNT) {
+        // TRN %1% is the maximum number of plates in a project.
+        show_warning(format_wxstr(_L("The flushing volume test needs more than %1% plates. Select fewer filaments."),
+                                  PartPlateList::MAX_PLATES_COUNT));
+        return false;
+    }
+
+    if (new_project(false, false, _L("Flushing volume")) == wxID_CANCEL)
+        return false;
+    wxGetApp().mainframe->select_tab(TAB_ID_PREPARE);
+
+    // Every filament change flushes only min_flush, enough to prime the nozzle, so the tower shows how the colour settles.
+    DynamicPrintConfig& print_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+    print_config.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(PrintSequence::ByObject));
+    print_config.set_key_value("enable_prime_tower", new ConfigOptionBool(false));
+    print_config.set_key_value("flush_into_infill", new ConfigOptionBool(false));
+    print_config.set_key_value("flush_into_objects", new ConfigOptionBool(false));
+    print_config.set_key_value("flush_into_support", new ConfigOptionBool(false));
+    print_config.set_key_value("enable_wrapping_detection", new ConfigOptionBool(false));
+    print_config.set_key_value("skirt_loops", new ConfigOptionInt(0));
+    print_config.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
+    DynamicPrintConfig& project_config = wxGetApp().preset_bundle->project_config;
+    auto& flush_matrix = project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values;
+    std::fill(flush_matrix.begin(), flush_matrix.end(), min_flush);
+    // The multipliers scale the matrix, which would change the flushed volume.
+    for (const char* key : {"flush_multiplier", "flush_multiplier_fast"}) {
+        if (auto* multipliers = project_config.option<ConfigOptionFloats>(key))
+            std::fill(multipliers->values.begin(), multipliers->values.end(), 1.);
+    }
+    sidebar().set_flushing_volume_warning(is_flush_config_modified());
+
+    wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
+    wxGetApp().get_tab(Preset::TYPE_PRINT)->reload_config();
+    // The 3D scene reads its own copy of the config, which would otherwise still show the prime tower.
+    on_config_change(wxGetApp().preset_bundle->full_config());
+
+    std::vector<size_t> obj_idxs;
+    for (size_t i = 0; i < changes.size(); ++i) {
+        const auto [from, to] = changes[i];
+        ModelObject* obj      = model().add_object();
+        obj->name             = std::to_string(from) + " -> " + std::to_string(to);
+        obj->config.set_key_value("extruder", new ConfigOptionInt(from));
+        // The base takes the object's filament.
+        obj->add_volume(base_mesh, false)->name = "base";
+        ModelVolume* tower = obj->add_volume(tower_mesh, false);
+        tower->name        = "tower";
+        tower->config.set_key_value("extruder", new ConfigOptionInt(to));
+
+        int        plate_idx = int(i / cells.size());
+        PartPlate* plate     = get_partplate_list().get_plate(plate_idx);
+        if (plate == nullptr) {
+            plate_idx = get_partplate_list().create_plate();
+            plate     = get_partplate_list().get_plate(plate_idx);
+        }
+        const Vec2d offset = cells[i % cells.size()] - footprint.center();
+        obj->add_instance()->set_offset(plate->get_origin() + Vec3d(offset.x(), offset.y(), 0.));
+
+        // add_to_plate() would move the instance to the plate centre.
+        const size_t obj_idx = model().objects.size() - 1;
+        plate->add_instance(int(obj_idx), 0, false);
+        sidebar().obj_list()->add_object_to_list(obj_idx);
+        obj_idxs.emplace_back(obj_idx);
+    }
+
+    changed_objects(obj_idxs);
+    update_project_dirty_from_presets();
+    return true;
+}
+
 void Plater::calib_VFA(const Calib_Params& params)
 {
     const auto calib_vfa_name = _L("VFA test");

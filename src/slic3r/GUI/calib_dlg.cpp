@@ -41,6 +41,10 @@
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Utils.hpp"
 #include "Plater.hpp"
+#include "libslic3r/PresetBundle.hpp"
+#include "GUI.hpp"
+#include "format.hpp"
+#include <wx/statbmp.h>
 
 namespace Slic3r { namespace GUI {
 
@@ -1150,6 +1154,147 @@ void Retraction_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
     this->Refresh();
     Fit();
 
+}
+
+// FlushVolume_Test_Dlg
+//
+
+FlushVolume_Test_Dlg::FlushVolume_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater)
+    : DPIDialog(parent, id, _L("Flushing volume test"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE), m_plater(plater)
+{
+    SetBackgroundColour(*wxWHITE); // make sure background color set for dialog
+    SetForegroundColour(wxColour("#363636"));
+    SetFont(Label::Body_14);
+
+    wxBoxSizer* v_sizer = new wxBoxSizer(wxVERTICAL);
+
+    // Filaments
+    LabeledStaticBox* filament_stb = new LabeledStaticBox(this, _L("Filaments"));
+    wxStaticBoxSizer* filament_sizer = new wxStaticBoxSizer(filament_stb, wxVERTICAL);
+    filament_sizer->AddSpacer(FromDIP(5));
+
+    const PresetBundle* preset_bundle = wxGetApp().preset_bundle;
+    const auto& colours = preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour")->values;
+    for (size_t idx : preset_bundle->physical_filament_config_indices()) {
+        if (idx >= colours.size() || idx >= preset_bundle->filament_presets.size())
+            continue;
+        const int filament_id = int(idx) + 1;
+        auto row = new wxBoxSizer(wxHORIZONTAL);
+        auto cb  = new ::CheckBox(this);
+        cb->SetValue(true);
+        cb->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent& e) { update_info(); e.Skip(); });
+        auto icon = new wxStaticBitmap(this, wxID_ANY, *get_extruder_color_icon(colours[idx], std::to_string(filament_id), FromDIP(20), FromDIP(20)));
+        m_icons.emplace_back(icon, colours[idx]);
+        auto name = new wxStaticText(this, wxID_ANY, from_u8(preset_bundle->filament_presets[idx]));
+        row->Add(cb, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+        row->Add(icon, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+        row->Add(name, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+        filament_sizer->Add(row, 0, wxLEFT, FromDIP(3));
+        m_filament_ids.emplace_back(filament_id);
+        m_cbFilaments.emplace_back(cb);
+    }
+    filament_sizer->AddSpacer(FromDIP(5));
+    v_sizer->Add(filament_sizer, 0, wxTOP | wxRIGHT | wxLEFT | wxEXPAND, FromDIP(10));
+
+    // Settings
+    LabeledStaticBox* settings_stb = new LabeledStaticBox(this, _L("Settings"));
+    wxStaticBoxSizer* settings_sizer = new wxStaticBoxSizer(settings_stb, wxVERTICAL);
+    settings_sizer->AddSpacer(FromDIP(5));
+
+    const wxString volume_str    = _L("Flushing volume: ");
+    const wxString min_flush_str = _L("Minimum flush: ");
+    const wxSize   st_size(GetTextMax(this, std::vector<wxString>{volume_str, min_flush_str}), -1);
+
+    auto volume_sizer = new wxBoxSizer(wxHORIZONTAL);
+    auto volume_text = new wxStaticText(this, wxID_ANY, volume_str, wxDefaultPosition, st_size, wxALIGN_LEFT);
+    m_tiVolume = new ::TextInput(this, std::to_string(500), _L("mm³"), "", wxDefaultPosition, FromDIP(wxSize(120, -1)));
+    m_tiVolume->GetTextCtrl()->SetValidator(wxTextValidator(wxFILTER_NUMERIC));
+    m_tiVolume->SetToolTip(_L("The volume each tower holds. It should be more than the largest flushing volume you expect."));
+    volume_sizer->Add(volume_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    volume_sizer->Add(m_tiVolume, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    settings_sizer->Add(volume_sizer, 0, wxLEFT, FromDIP(3));
+
+    auto min_flush_sizer = new wxBoxSizer(wxHORIZONTAL);
+    auto min_flush_text = new wxStaticText(this, wxID_ANY, min_flush_str, wxDefaultPosition, st_size, wxALIGN_LEFT);
+    m_tiMinFlush = new ::TextInput(this, std::to_string(100), _L("mm³"), "", wxDefaultPosition, FromDIP(wxSize(120, -1)));
+    m_tiMinFlush->GetTextCtrl()->SetValidator(wxTextValidator(wxFILTER_NUMERIC));
+    m_tiMinFlush->SetToolTip(_L("The volume flushed at every filament change before the tower starts, so the nozzle is primed and the "
+                                "tower prints reliably. Add it to the volume you measure on the tower."));
+    min_flush_sizer->Add(min_flush_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    min_flush_sizer->Add(m_tiMinFlush, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    settings_sizer->Add(min_flush_sizer, 0, wxLEFT, FromDIP(3));
+
+    m_stInfo = new wxStaticText(this, wxID_ANY, wxEmptyString);
+    settings_sizer->Add(m_stInfo, 0, wxALL, FromDIP(5));
+    settings_sizer->AddSpacer(FromDIP(5));
+
+    v_sizer->Add(settings_sizer, 0, wxTOP | wxRIGHT | wxLEFT | wxEXPAND, FromDIP(10));
+    v_sizer->AddSpacer(FromDIP(5));
+
+    auto dlg_btns = new DialogButtons(this, {"OK"});
+    v_sizer->Add(dlg_btns, 0, wxEXPAND);
+    dlg_btns->GetOK()->Bind(wxEVT_BUTTON, &FlushVolume_Test_Dlg::on_start, this);
+
+    update_info();
+    SetSizerAndFit(v_sizer);
+    wxGetApp().UpdateDlgDarkUI(this);
+}
+
+std::vector<int> FlushVolume_Test_Dlg::selected_filaments() const
+{
+    std::vector<int> ids;
+    for (size_t i = 0; i < m_cbFilaments.size(); ++i)
+        if (m_cbFilaments[i]->GetValue())
+            ids.emplace_back(m_filament_ids[i]);
+    return ids;
+}
+
+void FlushVolume_Test_Dlg::update_info()
+{
+    const int n = int(selected_filaments().size());
+    const int objects = n * (n - 1);
+    // TRN %1% is the number of test objects, one for each filament change between the selected filaments.
+    m_stInfo->SetLabel(format_wxstr(_L_PLURAL("%1% filament change to test", "%1% filament changes to test", objects), objects));
+    Layout();
+}
+
+void FlushVolume_Test_Dlg::on_start(wxCommandEvent& event)
+{
+    const std::vector<int> filament_ids = selected_filaments();
+    double volume = 0.;
+    if (filament_ids.size() < 2) {
+        MessageDialog msg_dlg(nullptr, _L("Select at least two filaments."), wxEmptyString, wxICON_WARNING | wxOK);
+        msg_dlg.ShowModal();
+        return;
+    }
+    if (!m_tiVolume->GetTextCtrl()->GetValue().ToDouble(&volume) || !(volume >= 50.)) {
+        MessageDialog msg_dlg(nullptr, _L("Please enter a flushing volume of at least 50 mm³."), wxEmptyString, wxICON_WARNING | wxOK);
+        msg_dlg.ShowModal();
+        return;
+    }
+
+    double min_flush = 0.;
+    if (!m_tiMinFlush->GetTextCtrl()->GetValue().ToDouble(&min_flush) || !(min_flush >= 0.) || min_flush >= volume) {
+        MessageDialog msg_dlg(nullptr, _L("Please enter a minimum flush of at least 0 mm³ and less than the flushing volume."), wxEmptyString,
+                              wxICON_WARNING | wxOK);
+        msg_dlg.ShowModal();
+        return;
+    }
+
+    if (m_plater->calib_flush_volume(filament_ids, volume, min_flush))
+        EndModal(wxID_OK);
+}
+
+void FlushVolume_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect)
+{
+    for (::CheckBox* cb : m_cbFilaments)
+        cb->Rescale();
+    for (size_t i = 0; i < m_icons.size(); ++i)
+        m_icons[i].first->SetBitmap(*get_extruder_color_icon(m_icons[i].second, std::to_string(m_filament_ids[i]), FromDIP(20), FromDIP(20)));
+    m_tiVolume->Rescale();
+    m_tiMinFlush->Rescale();
+    GetSizer()->SetSizeHints(this);
+    Refresh();
 }
 
 // Input_Shaping_Freq_Test_Dlg

@@ -298,6 +298,8 @@ std::vector<NativeCommand> build_command_catalog()
     add_with_icon("calib_input_shaping_damp", L("Input Shaping Damping Calibration"), L("Calibration"), "param_resonance_avoidance",
         [](const std::string&) { return calib_command(CalibKind::InputShapingDamp); });
     add_with_icon("calib_vfa", L("VFA Calibration"), L("Calibration"), "param_speed", [](const std::string&) { return calib_command(CalibKind::VFA); });
+    add_with_icon("calib_flush_volume", L("Flushing Volume Calibration"), L("Calibration"), "param_flush",
+        [](const std::string&) { return calib_command(CalibKind::FlushVolume); });
 
     // ---- View ----
     // Titles are L("...")-marked here (not via a variable) so xgettext can extract them.

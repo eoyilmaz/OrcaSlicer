@@ -1,5 +1,6 @@
 #pragma once
 #include "Point.hpp"
+#include "Polygon.hpp"
 #include <math.h>
 #include <cmath>
 #include <cstddef>
@@ -64,6 +65,16 @@ struct Calib_Params
 static constexpr int vfa_layers_per_block = 25;
 static constexpr double vfa_base_block_height = 5.0;
 static constexpr double vfa_base_nozzle_diameter = 0.4;
+
+// Orders every filament change between the given filaments (each ordered pair once) so that each
+// change starts with the filament the previous one ended with: an Eulerian circuit of the complete
+// directed graph, built with Hierholzer's algorithm. Returns N * (N - 1) (from, to) pairs.
+std::vector<std::pair<int, int>> flush_volume_change_sequence(const std::vector<int> &filament_ids);
+
+// Centres of a grid of footprint-sized cells, pitch apart, centred on the bed and listed row by row from
+// the front left. The grid is sized to the bed shrunk by margin; cells that leave the bed or touch an
+// excluded area are left out.
+std::vector<Vec2d> flush_volume_grid_cells(const Pointfs &bed_shape, const Polygons &excluded, const Vec2d &footprint, const Vec2d &pitch, double margin);
 
 enum FlowRatioCalibrationType {
     COMPLETE_CALIBRATION = 0,

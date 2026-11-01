@@ -3737,6 +3737,11 @@ void MainFrame::init_menubar_as_editor()
         [this](wxCommandEvent&) { run_calibration(CalibKind::VFA); }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
+    // Flushing volume
+    append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Flushing volume"), _L("Flushing volume calibration"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::FlushVolume); }, "", nullptr,
+        [this]() { return m_plater->is_view3D_shown() && wxGetApp().preset_bundle->num_physical_filaments() > 1; }, this);
+
     // help
     append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Calibration Guide"), _L("Calibration Guide"), [](wxCommandEvent &)
                      { wxLaunchDefaultBrowser("https://www.orcaslicer.com/wiki/calibration_guide", wxBROWSER_NEW_WINDOW); }, "", nullptr, [this]()
@@ -3842,6 +3847,11 @@ void MainFrame::init_menubar_as_editor()
     append_menu_item(calib_menu, wxID_ANY, _L("VFA"), _L("VFA"),
         [this](wxCommandEvent&) { run_calibration(CalibKind::VFA); }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
+
+    // Flushing volume
+    append_menu_item(calib_menu, wxID_ANY, _L("Flushing volume"), _L("Flushing volume calibration"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::FlushVolume); }, "", nullptr,
+        [this]() { return m_plater->is_view3D_shown() && wxGetApp().preset_bundle->num_physical_filaments() > 1; }, this);
     // help
     append_menu_item(calib_menu, wxID_ANY, _L("Calibration Guide"), _L("Calibration Guide"),
         [](wxCommandEvent&) { wxLaunchDefaultBrowser("https://www.orcaslicer.com/wiki/calibration_guide", wxBROWSER_NEW_WINDOW); }, "", nullptr,
@@ -4766,6 +4776,12 @@ void MainFrame::run_calibration(CalibKind calib_kind)
         if (!m_vfa_test_dlg)
             m_vfa_test_dlg = new VFA_Test_Dlg((wxWindow*) this, wxID_ANY, m_plater);
         m_vfa_test_dlg->ShowModal();
+        break;
+    }
+    case CalibKind::FlushVolume: {
+        auto dlg = new FlushVolume_Test_Dlg((wxWindow*) this, wxID_ANY, m_plater);
+        dlg->ShowModal();
+        dlg->Destroy();
         break;
     }
     }

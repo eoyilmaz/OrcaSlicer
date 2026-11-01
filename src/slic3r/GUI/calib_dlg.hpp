@@ -13,11 +13,15 @@
 #include "Widgets/RadioGroup.hpp"
 #include "GUI_App.hpp"
 #include "wx/hyperlink.h"
+#include <string>
+#include <utility>
+#include <vector>
 #include <wx/anybutton.h>
 #include <wx/checklst.h>
 #include <wx/event.h>
 #include <wx/radiobox.h>
 #include <wx/sizer.h>
+#include <wx/statbmp.h>
 #include "libslic3r/calib.hpp"
 
 namespace Slic3r { namespace GUI {
@@ -128,6 +132,28 @@ protected:
     TextInput* m_tiStart;
     TextInput* m_tiEnd;
     TextInput* m_tiStep;
+    Plater* m_plater;
+};
+
+class FlushVolume_Test_Dlg : public DPIDialog
+{
+public:
+    FlushVolume_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater);
+    void on_dpi_changed(const wxRect& suggested_rect) override;
+
+protected:
+    void on_start(wxCommandEvent& event);
+    std::vector<int> selected_filaments() const;
+    void update_info();
+
+    // 1-based filament ids, parallel to m_cbFilaments.
+    std::vector<int> m_filament_ids;
+    std::vector<::CheckBox*> m_cbFilaments;
+    // Colour swatches with their colours, parallel to m_cbFilaments, for redrawing on a DPI change.
+    std::vector<std::pair<wxStaticBitmap*, std::string>> m_icons;
+    ::TextInput* m_tiVolume;
+    ::TextInput* m_tiMinFlush;
+    wxStaticText* m_stInfo;
     Plater* m_plater;
 };
 
