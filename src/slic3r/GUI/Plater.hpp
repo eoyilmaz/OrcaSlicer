@@ -420,7 +420,7 @@ public:
     void calib_input_shaping_damp(const Calib_Params& params);
     void Calib_Cornering(const Calib_Params& params);
     // Returns false, after telling the user why, when the test does not fit the printer; the project is then left untouched.
-    bool calib_flush_volume(const std::vector<int>& filament_ids, double flush_volume, double min_flush);
+    bool calib_flush_volume(const std::vector<int>& filament_ids, double flush_volume, double min_flush, double volume_per_mm, bool reference_towers);
 
     BuildVolume_Type get_build_volume_type() const;
 

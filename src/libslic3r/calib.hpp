@@ -17,6 +17,7 @@
 
 namespace Slic3r {
 
+class Flow;
 class GCode;
 class Model;
 class ModelObject;
@@ -69,12 +70,33 @@ static constexpr double vfa_base_nozzle_diameter = 0.4;
 // Orders every filament change between the given filaments (each ordered pair once) so that each
 // change starts with the filament the previous one ended with: an Eulerian circuit of the complete
 // directed graph, built with Hierholzer's algorithm. Returns N * (N - 1) (from, to) pairs.
-std::vector<std::pair<int, int>> flush_volume_change_sequence(const std::vector<int> &filament_ids);
+// With references, a (filament, filament) pair, a tower printed in one filament only to compare the others against,
+// also follows the first change into each filament (and leads for the first filament), which needs no extra change.
+// Returns N * N pairs then.
+std::vector<std::pair<int, int>> flush_volume_change_sequence(const std::vector<int> &filament_ids, bool references);
 
 // Centres of a grid of footprint-sized cells, pitch apart, centred on the bed and listed row by row from
 // the front left. The grid is sized to the bed shrunk by margin; cells that leave the bed or touch an
-// excluded area are left out.
-std::vector<Vec2d> flush_volume_grid_cells(const Pointfs &bed_shape, const Polygons &excluded, const Vec2d &footprint, const Vec2d &pitch, double margin);
+// excluded area are left out. A non-zero count smaller than the grid lays out only count cells, in as few rows
+// as they need, each row centred, so a partly filled plate keeps its objects in the middle.
+std::vector<Vec2d> flush_volume_grid_cells(const Pointfs &bed_shape, const Polygons &excluded, const Vec2d &footprint, const Vec2d &pitch, double margin,
+                                           size_t count = 0);
+
+// A flushing volume test object is a thin base with a box-shaped tower on top. The tower prints as a single outer wall
+// loop with no shells and no infill, so the volume it holds per mm of height is set by the loop length and the outer
+// wall flow, which suits every nozzle size, instead of by the mesh.
+static constexpr double flush_volume_base_height = 1.6;
+// How far the base reaches past the tower on each side.
+static constexpr double flush_volume_base_margin = 0.8;
+
+// Flow of the tower's outer wall loop with the given print and printer config.
+Flow flush_volume_tower_flow(const DynamicPrintConfig &config);
+// Outer size of a tower whose loop, printed with flow, holds volume_per_mm of filament per mm of height.
+Vec2d flush_volume_tower_size(double volume_per_mm, const Flow &flow);
+// Adds the base, in filament from, and the tower on top of it, in filament to, centred on the object's origin. The
+// object takes the flow's layer height and the tower its line width, so the volume per mm does not change with the
+// print settings.
+void add_flush_volume_parts(ModelObject &object, int from, int to, const Vec2d &tower_size, double tower_height, const Flow &flow);
 
 enum FlowRatioCalibrationType {
     COMPLETE_CALIBRATION = 0,

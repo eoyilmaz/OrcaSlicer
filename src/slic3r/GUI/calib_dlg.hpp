@@ -153,6 +153,8 @@ protected:
     std::vector<std::pair<wxStaticBitmap*, std::string>> m_icons;
     ::TextInput* m_tiVolume;
     ::TextInput* m_tiMinFlush;
+    ::TextInput* m_tiVolumePerMm;
+    ::CheckBox* m_cbReferences;
     wxStaticText* m_stInfo;
     Plater* m_plater;
 };

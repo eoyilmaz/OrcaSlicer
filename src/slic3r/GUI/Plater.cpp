@@ -43,6 +43,7 @@
 #include "libslic3r/Preset.hpp"
 #include <fstream>
 #include "libslic3r/calib.hpp"
+#include "libslic3r/Flow.hpp"
 #include <iterator>
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/Geometry.hpp"
@@ -18156,7 +18157,7 @@ void Plater::calib_retraction(const Calib_Params& params)
     p->background_process.fff_print()->set_calib_params(params);
 }
 
-bool Plater::calib_flush_volume(const std::vector<int>& filament_ids, double flush_volume, double min_flush)
+bool Plater::calib_flush_volume(const std::vector<int>& filament_ids, double flush_volume, double min_flush, double volume_per_mm, bool reference_towers)
 {
     auto show_warning = [](const wxString& msg) {
         MessageDialog dlg(nullptr, msg, _L("Flushing volume"), wxICON_WARNING | wxOK);
@@ -18175,71 +18176,59 @@ bool Plater::calib_flush_volume(const std::vector<int>& filament_ids, double flu
         return false;
     }
 
-    // Raw meshes: the files are loaded without instances, and the base and tower must keep the
-    // shared frame they were modelled in so the tower stays seated on the base.
-    auto load_mesh = [](const std::string& file) {
-        const Model model = Model::read_from_file(Slic3r::resources_dir() + "/calib/flush_volume/" + file, nullptr, nullptr,
-                                                  LoadStrategy::LoadModel);
-        TriangleMesh mesh;
-        for (const ModelObject* object : model.objects)
-            mesh.merge(object->raw_mesh());
-        return mesh;
-    };
-    TriangleMesh base_mesh;
-    TriangleMesh tower_mesh;
-    try {
-        base_mesh  = load_mesh("base.stl");
-        tower_mesh = load_mesh("tower.stl");
-    } catch (const std::exception& e) {
-        BOOST_LOG_TRIVIAL(error) << "Failed to load the flushing volume test model: " << e.what();
-    }
-    if (base_mesh.empty() || tower_mesh.empty()) {
-        show_warning(_L("Failed to load the flushing volume test model."));
+    const Flow   flow       = flush_volume_tower_flow(full_config);
+    const Vec2d  tower_size = flush_volume_tower_size(volume_per_mm, flow);
+    // A shorter side would give a tower too thin to print standing.
+    static constexpr double min_tower_side = 5.;
+    if (tower_size.y() < min_tower_side) {
+        // TRN %1% is a volume in mm³ per mm of tower height.
+        show_warning(format_wxstr(_L("A tower volume per mm of %1% mm³/mm gives a tower too thin to print. Raise the tower volume per mm."),
+                                  wxString::FromDouble(volume_per_mm, 1)));
         return false;
     }
-
-    // The tower sits on the base and has a constant cross-section, so scaling it along Z keeps the
-    // volume per mm of height that the user multiplies the measured gradient height with.
-    const BoundingBoxf3 base_bb      = base_mesh.bounding_box();
-    const BoundingBoxf3 tower_bb     = tower_mesh.bounding_box();
-    const double        tower_height = flush_volume * tower_bb.size().z() / tower_mesh.volume();
-    const double        total_height = base_bb.max.z() + tower_height;
-    const double        max_height   = std::min(full_config.opt_float("extruder_clearance_height_to_rod"), full_config.opt_float("printable_height"));
+    const double tower_height = flush_volume / volume_per_mm;
+    const double total_height = flush_volume_base_height + tower_height;
+    const double max_height   = std::min(full_config.opt_float("extruder_clearance_height_to_rod"), full_config.opt_float("printable_height"));
     if (total_height > max_height) {
         // TRN %1% and %2% are heights in mm.
         show_warning(format_wxstr(_L("The towers would be %1% mm tall, which is more than the %2% mm the extruder clearance and printable height "
-                                     "allow when printing by object. Lower the flushing volume."),
+                                     "allow when printing by object. Lower the flushing volume or raise the tower volume per mm."),
                                   wxString::FromDouble(total_height, 1), wxString::FromDouble(max_height, 1)));
         return false;
     }
-    tower_mesh.translate(0.f, 0.f, -float(tower_bb.min.z()));
-    tower_mesh.scale(Vec3f(1.f, 1.f, float(tower_height / tower_bb.size().z())));
-    tower_mesh.translate(0.f, 0.f, float(base_bb.max.z()));
 
     // Lay the objects out row by row from the front left corner, as far apart as by-object printing needs.
     // The skirt is turned off below, so it needs no room.
-    BoundingBoxf footprint(to_2d(base_bb.min), to_2d(base_bb.max));
-    footprint.merge(BoundingBoxf(to_2d(tower_bb.min), to_2d(tower_bb.max)));
-    const Vec2d pitch = footprint.size() + Vec2d::Constant(full_config.opt_float("extruder_clearance_radius") + 1.);
+    const Vec2d footprint = tower_size + Vec2d::Constant(2 * flush_volume_base_margin);
+    const Vec2d pitch     = footprint + Vec2d::Constant(full_config.opt_float("extruder_clearance_radius") + 1.);
 
     Polygons excluded;
     for (const BedExcludeRegion& region : get_bed_excluded_regions(full_config))
         excluded.emplace_back(region.polygon);
-    const std::vector<Vec2d> cells = flush_volume_grid_cells(full_config.option<ConfigOptionPoints>("printable_area")->values, excluded,
-                                                             footprint.size(), pitch, BED_SHRINK_SEQ_PRINT);
+    const Pointfs&           bed_shape = full_config.option<ConfigOptionPoints>("printable_area")->values;
+    const std::vector<Vec2d> cells     = flush_volume_grid_cells(bed_shape, excluded, footprint, pitch, BED_SHRINK_SEQ_PRINT);
     if (cells.empty()) {
         show_warning(_L("The flushing volume test does not fit on the plate with the current extruder clearance radius."));
         return false;
     }
     // Object k prints the base in the filament the tower of object k - 1 ended with, so the only
     // filament change on a plate is the one under test, at the bottom of each tower.
-    const std::vector<std::pair<int, int>> changes = flush_volume_change_sequence(filament_ids);
+    const std::vector<std::pair<int, int>> changes = flush_volume_change_sequence(filament_ids, reference_towers);
     if ((changes.size() + cells.size() - 1) / cells.size() > PartPlateList::MAX_PLATES_COUNT) {
         // TRN %1% is the maximum number of plates in a project.
         show_warning(format_wxstr(_L("The flushing volume test needs more than %1% plates. Select fewer filaments."),
                                   PartPlateList::MAX_PLATES_COUNT));
         return false;
     }
+    // A partly filled last plate gets its objects in the middle of the bed. If an excluded area or the bed shape
+    // takes some of those cells, it keeps the front rows of the full grid.
+    const size_t       last_plate_count = changes.size() % cells.size();
+    std::vector<Vec2d> last_plate_cells;
+    if (last_plate_count > 0)
+        last_plate_cells = flush_volume_grid_cells(bed_shape, excluded, footprint, pitch, BED_SHRINK_SEQ_PRINT, last_plate_count);
+    if (last_plate_cells.size() < last_plate_count)
+        last_plate_cells.assign(cells.begin(), cells.begin() + last_plate_count);
+    const size_t last_plate_start = changes.size() - last_plate_count;
 
     if (new_project(false, false, _L("Flushing volume")) == wxID_CANCEL)
         return false;
@@ -18274,13 +18263,13 @@ bool Plater::calib_flush_volume(const std::vector<int>& filament_ids, double flu
     for (size_t i = 0; i < changes.size(); ++i) {
         const auto [from, to] = changes[i];
         ModelObject* obj      = model().add_object();
-        obj->name             = std::to_string(from) + " -> " + std::to_string(to);
-        obj->config.set_key_value("extruder", new ConfigOptionInt(from));
-        // The base takes the object's filament.
-        obj->add_volume(base_mesh, false)->name = "base";
-        ModelVolume* tower = obj->add_volume(tower_mesh, false);
-        tower->name        = "tower";
-        tower->config.set_key_value("extruder", new ConfigOptionInt(to));
+        // The name becomes the default G-code file name, so it has no spaces or characters file systems reject, such as '>'.
+        obj->name = from == to ?
+                        // TRN %1% is a filament number. Names a test object printed in that filament only, to compare the others against.
+                        // It becomes a file name, so keep the underscore instead of a space.
+                        format(_u8L("Reference_%1%"), from) :
+                        format("%1%_to_%2%", from, to);
+        add_flush_volume_parts(*obj, from, to, tower_size, tower_height, flow);
 
         int        plate_idx = int(i / cells.size());
         PartPlate* plate     = get_partplate_list().get_plate(plate_idx);
@@ -18288,7 +18277,7 @@ bool Plater::calib_flush_volume(const std::vector<int>& filament_ids, double flu
             plate_idx = get_partplate_list().create_plate();
             plate     = get_partplate_list().get_plate(plate_idx);
         }
-        const Vec2d offset = cells[i % cells.size()] - footprint.center();
+        const Vec2d offset = i < last_plate_start ? cells[i % cells.size()] : last_plate_cells[i - last_plate_start];
         obj->add_instance()->set_offset(plate->get_origin() + Vec3d(offset.x(), offset.y(), 0.));
 
         // add_to_plate() would move the instance to the plate centre.

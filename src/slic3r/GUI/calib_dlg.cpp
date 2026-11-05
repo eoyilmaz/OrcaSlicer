@@ -1201,9 +1201,10 @@ FlushVolume_Test_Dlg::FlushVolume_Test_Dlg(wxWindow* parent, wxWindowID id, Plat
     wxStaticBoxSizer* settings_sizer = new wxStaticBoxSizer(settings_stb, wxVERTICAL);
     settings_sizer->AddSpacer(FromDIP(5));
 
-    const wxString volume_str    = _L("Flushing volume: ");
-    const wxString min_flush_str = _L("Minimum flush: ");
-    const wxSize   st_size(GetTextMax(this, std::vector<wxString>{volume_str, min_flush_str}), -1);
+    const wxString volume_str        = _L("Flushing volume: ");
+    const wxString min_flush_str     = _L("Minimum flush: ");
+    const wxString volume_per_mm_str = _L("Tower volume per mm: ");
+    const wxSize   st_size(GetTextMax(this, std::vector<wxString>{volume_str, min_flush_str, volume_per_mm_str}), -1);
 
     auto volume_sizer = new wxBoxSizer(wxHORIZONTAL);
     auto volume_text = new wxStaticText(this, wxID_ANY, volume_str, wxDefaultPosition, st_size, wxALIGN_LEFT);
@@ -1223,6 +1224,31 @@ FlushVolume_Test_Dlg::FlushVolume_Test_Dlg(wxWindow* parent, wxWindowID id, Plat
     min_flush_sizer->Add(min_flush_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
     min_flush_sizer->Add(m_tiMinFlush, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
     settings_sizer->Add(min_flush_sizer, 0, wxLEFT, FromDIP(3));
+
+    // Finer readings for smaller nozzles, which flush less: 20 mm³/mm for a 0.4 mm nozzle.
+    const double nozzle_diameter = preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter")->get_at(0);
+    auto volume_per_mm_sizer = new wxBoxSizer(wxHORIZONTAL);
+    auto volume_per_mm_text  = new wxStaticText(this, wxID_ANY, volume_per_mm_str, wxDefaultPosition, st_size, wxALIGN_LEFT);
+    m_tiVolumePerMm = new ::TextInput(this, wxString::Format("%g", std::round(nozzle_diameter * 500.) / 10.), _L("mm³/mm"), "",
+                                      wxDefaultPosition, FromDIP(wxSize(120, -1)));
+    m_tiVolumePerMm->GetTextCtrl()->SetValidator(wxTextValidator(wxFILTER_NUMERIC));
+    m_tiVolumePerMm->SetToolTip(_L("The volume each mm of tower height holds. Multiply the height of the colour change with it. "
+                                   "A lower value gives finer readings, but taller towers."));
+    volume_per_mm_sizer->Add(volume_per_mm_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    volume_per_mm_sizer->Add(m_tiVolumePerMm, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    settings_sizer->Add(volume_per_mm_sizer, 0, wxLEFT, FromDIP(3));
+
+    auto references_sizer = new wxBoxSizer(wxHORIZONTAL);
+    m_cbReferences        = new ::CheckBox(this);
+    m_cbReferences->SetValue(true);
+    auto references_text = new wxStaticText(this, wxID_ANY, _L("Print reference towers"));
+    const wxString references_tip = _L("Also print one tower in each filament only, with no filament change, to compare the "
+                                       "others against.");
+    m_cbReferences->SetToolTip(references_tip);
+    references_text->SetToolTip(references_tip);
+    references_sizer->Add(m_cbReferences, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    references_sizer->Add(references_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    settings_sizer->Add(references_sizer, 0, wxLEFT, FromDIP(3));
 
     m_stInfo = new wxStaticText(this, wxID_ANY, wxEmptyString);
     settings_sizer->Add(m_stInfo, 0, wxALL, FromDIP(5));
@@ -1281,7 +1307,14 @@ void FlushVolume_Test_Dlg::on_start(wxCommandEvent& event)
         return;
     }
 
-    if (m_plater->calib_flush_volume(filament_ids, volume, min_flush))
+    double volume_per_mm = 0.;
+    if (!m_tiVolumePerMm->GetTextCtrl()->GetValue().ToDouble(&volume_per_mm) || !(volume_per_mm > 0.)) {
+        MessageDialog msg_dlg(nullptr, _L("Please enter a tower volume per mm greater than 0 mm³/mm."), wxEmptyString, wxICON_WARNING | wxOK);
+        msg_dlg.ShowModal();
+        return;
+    }
+
+    if (m_plater->calib_flush_volume(filament_ids, volume, min_flush, volume_per_mm, m_cbReferences->GetValue()))
         EndModal(wxID_OK);
 }
 
@@ -1293,6 +1326,8 @@ void FlushVolume_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect)
         m_icons[i].first->SetBitmap(*get_extruder_color_icon(m_icons[i].second, std::to_string(m_filament_ids[i]), FromDIP(20), FromDIP(20)));
     m_tiVolume->Rescale();
     m_tiMinFlush->Rescale();
+    m_tiVolumePerMm->Rescale();
+    m_cbReferences->Rescale();
     GetSizer()->SetSizeHints(this);
     Refresh();
 }

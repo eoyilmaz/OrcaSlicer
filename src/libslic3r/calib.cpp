@@ -9,6 +9,7 @@
 #include "GCode/GCodeProcessor.hpp"
 #include "CustomGCode.hpp"
 #include "Model.hpp"
+#include "TriangleMesh.hpp"
 #include "GCode.hpp"
 #include "PrintConfig.hpp"
 #include <algorithm>
@@ -27,7 +28,7 @@
 
 namespace Slic3r {
 
-std::vector<std::pair<int, int>> flush_volume_change_sequence(const std::vector<int> &filament_ids)
+std::vector<std::pair<int, int>> flush_volume_change_sequence(const std::vector<int> &filament_ids, bool references)
 {
     const size_t n = filament_ids.size();
     if (n < 2)
@@ -53,32 +54,95 @@ std::vector<std::pair<int, int>> flush_volume_change_sequence(const std::vector<
     std::reverse(circuit.begin(), circuit.end());
 
     std::vector<std::pair<int, int>> changes;
-    changes.reserve(circuit.size() - 1);
-    for (size_t i = 1; i < circuit.size(); ++i)
+    changes.reserve(n * n);
+    std::vector<bool> referenced(n, false);
+    auto add_reference = [&](size_t idx) {
+        if (references && !referenced[idx]) {
+            referenced[idx] = true;
+            changes.emplace_back(filament_ids[idx], filament_ids[idx]);
+        }
+    };
+    add_reference(circuit.front());
+    for (size_t i = 1; i < circuit.size(); ++i) {
         changes.emplace_back(filament_ids[circuit[i - 1]], filament_ids[circuit[i]]);
+        add_reference(circuit[i]);
+    }
     return changes;
 }
 
-std::vector<Vec2d> flush_volume_grid_cells(const Pointfs &bed_shape, const Polygons &excluded, const Vec2d &footprint, const Vec2d &pitch, double margin)
+std::vector<Vec2d> flush_volume_grid_cells(const Pointfs &bed_shape, const Polygons &excluded, const Vec2d &footprint, const Vec2d &pitch, double margin,
+                                           size_t count)
 {
     const BoundingBoxf bed_bb(bed_shape);
     const Polygon      bed_polygon = Polygon::new_scale(bed_shape);
     const Vec2d        usable      = bed_bb.size() - Vec2d::Constant(2 * margin) - footprint;
-    const int          cols        = usable.x() < 0 ? 0 : int(usable.x() / pitch.x()) + 1;
-    const int          rows        = usable.y() < 0 ? 0 : int(usable.y() / pitch.y()) + 1;
-    const Vec2d        first_cell  = bed_bb.center() - Vec2d((cols - 1) * pitch.x(), (rows - 1) * pitch.y()) / 2;
+    int                cols        = usable.x() < 0 ? 0 : int(usable.x() / pitch.x()) + 1;
+    int                rows        = usable.y() < 0 ? 0 : int(usable.y() / pitch.y()) + 1;
+    if (count > 0 && cols > 0 && count < size_t(cols * rows)) {
+        cols = std::min(cols, int(count));
+        rows = int((count + cols - 1) / cols);
+    }
 
     std::vector<Vec2d> cells;
-    for (int row = 0; row < rows; ++row)
-        for (int col = 0; col < cols; ++col) {
-            const Vec2d   center = first_cell + Vec2d(col * pitch.x(), row * pitch.y());
+    for (int row = 0; row < rows; ++row) {
+        // A partly filled last row is centred too.
+        const int   row_cols   = count > 0 ? std::min(cols, int(count) - row * cols) : cols;
+        const Vec2d first_cell = bed_bb.center() - Vec2d((row_cols - 1) * pitch.x(), (rows - 1 - 2 * row) * pitch.y()) / 2;
+        for (int col = 0; col < row_cols; ++col) {
+            const Vec2d   center = first_cell + Vec2d(col * pitch.x(), 0.);
             const Vec2d   lo     = center - footprint / 2;
             const Vec2d   hi     = center + footprint / 2;
             const Polygon cell   = Polygon::new_scale({lo, Vec2d(hi.x(), lo.y()), hi, Vec2d(lo.x(), hi.y())});
             if (diff(cell, bed_polygon).empty() && intersection(Polygons{cell}, excluded).empty())
                 cells.emplace_back(center);
         }
+    }
     return cells;
+}
+
+Flow flush_volume_tower_flow(const DynamicPrintConfig &config)
+{
+    // As PrintRegion::flow(): a zero width falls back to the default line width.
+    const ConfigOptionFloatOrPercent *width = config.option<ConfigOptionFloatOrPercent>("outer_wall_line_width");
+    if (width->value == 0)
+        width = config.option<ConfigOptionFloatOrPercent>("line_width");
+    return Flow::new_from_config_width(frExternalPerimeter, *width, float(config.option<ConfigOptionFloats>("nozzle_diameter")->get_at(0)),
+                                       float(config.opt_float("layer_height")));
+}
+
+Vec2d flush_volume_tower_size(double volume_per_mm, const Flow &flow)
+{
+    // Each layer lays mm3_per_mm down along the loop, which runs half a line width inside the box. The loop is twice
+    // as long as it is wide.
+    const double loop_length = volume_per_mm * flow.height() / flow.mm3_per_mm();
+    return Vec2d(loop_length / 3., loop_length / 6.) + Vec2d::Constant(flow.width());
+}
+
+void add_flush_volume_parts(ModelObject &object, int from, int to, const Vec2d &tower_size, double tower_height, const Flow &flow)
+{
+    const Vec2d  base_size = tower_size + Vec2d::Constant(2 * flush_volume_base_margin);
+    TriangleMesh base_mesh = make_cube(base_size.x(), base_size.y(), flush_volume_base_height);
+    base_mesh.translate(-float(base_size.x() / 2), -float(base_size.y() / 2), 0.f);
+    TriangleMesh tower_mesh = make_cube(tower_size.x(), tower_size.y(), tower_height);
+    tower_mesh.translate(-float(tower_size.x() / 2), -float(tower_size.y() / 2), float(flush_volume_base_height));
+
+    // The base takes the object's filament.
+    object.config.set_key_value("extruder", new ConfigOptionInt(from));
+    object.config.set_key_value("layer_height", new ConfigOptionFloat(flow.height()));
+    object.add_volume(std::move(base_mesh), ModelVolumeType::MODEL_PART, false)->name = "base";
+
+    ModelVolume *tower = object.add_volume(std::move(tower_mesh), ModelVolumeType::MODEL_PART, false);
+    tower->name        = "tower";
+    tower->config.set_key_value("extruder", new ConfigOptionInt(to));
+    tower->config.set_key_value("wall_loops", new ConfigOptionInt(1));
+    tower->config.set_key_value("top_shell_layers", new ConfigOptionInt(0));
+    tower->config.set_key_value("bottom_shell_layers", new ConfigOptionInt(0));
+    tower->config.set_key_value("top_shell_thickness", new ConfigOptionFloat(0.));
+    tower->config.set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0.));
+    tower->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(0.));
+    tower->config.set_key_value("outer_wall_line_width", new ConfigOptionFloatOrPercent(flow.width(), false));
+    tower->config.set_key_value("outer_wall_flow_ratio", new ConfigOptionFloat(1.));
+    tower->config.set_key_value("fuzzy_skin", new ConfigOptionEnum<FuzzySkinType>(FuzzySkinType::None));
 }
 
 // Calculate the optimal Pressure Advance speed

@@ -15,6 +15,7 @@
 
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Flow.hpp"
+#include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -146,4 +147,54 @@ TEST_CASE("The PA line test prints with the speed and extrusion of the filament 
     }
     for (const Move &move : box)
         CHECK_THAT(move.e_per_mm, Catch::Matchers::WithinRel(e_per_mm, 0.005));
+}
+
+TEST_CASE("The flushing volume tower holds the requested volume per mm for every nozzle size", "[Calib]")
+{
+    const double      nozzle    = GENERATE(0.2, 0.4, 0.6, 0.8);
+    const std::string generator = GENERATE("classic", "arachne");
+    CAPTURE(nozzle, generator);
+    // The dialog's default: 20 mm³/mm for a 0.4 mm nozzle.
+    const double       volume_per_mm = 50. * nozzle;
+    const double       layer_height  = nozzle / 2.;
+    DynamicPrintConfig config        = Test::multifilament_config(2, {
+        {"nozzle_diameter", std::to_string(nozzle)},
+        {"layer_height", std::to_string(layer_height)},
+        {"initial_layer_print_height", std::to_string(layer_height)},
+        {"line_width", "105%"},
+        {"outer_wall_line_width", "0"},
+        {"wall_generator", generator},
+        {"enable_prime_tower", 0},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+    });
+
+    const Flow   flow         = flush_volume_tower_flow(config);
+    const Vec2d  tower_size   = flush_volume_tower_size(volume_per_mm, flow);
+    const double tower_height = 10.;
+    Model        model;
+    ModelObject *object = model.add_object();
+    add_flush_volume_parts(*object, 1, 2, tower_size, tower_height, flow);
+    object->add_instance()->set_offset(Vec3d(100., 100., 0.));
+    Print print;
+    print.apply(model, config);
+    print.process();
+
+    // Every tower layer is one outer wall loop and nothing else. Leave out the layer the tower starts on, which may
+    // still hold the top of the base, and the last one, which may be cut short.
+    const PrintObject &print_object = *print.objects().front();
+    size_t             tower_layers = 0;
+    for (const Layer *layer : print_object.layers()) {
+        if (layer->print_z < flush_volume_base_height + 2 * layer_height || layer->print_z > flush_volume_base_height + tower_height - layer_height)
+            continue;
+        double volume = 0.;
+        for (const LayerRegion *region : layer->regions()) {
+            volume += region->perimeters.total_volume();
+            volume += region->fills.total_volume();
+        }
+        CAPTURE(layer->print_z);
+        CHECK_THAT(volume / layer->height, Catch::Matchers::WithinRel(volume_per_mm, 0.02));
+        ++tower_layers;
+    }
+    CHECK(tower_layers > 0);
 }

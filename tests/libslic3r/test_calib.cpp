@@ -13,6 +13,7 @@
 
 #include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "libslic3r/calib.hpp"
@@ -134,7 +135,7 @@ TEST_CASE("Flush volume change sequence covers every pair as one chain", "[Calib
     for (const std::vector<int> &ids : id_sets) {
         const size_t n = ids.size();
         CAPTURE(n);
-        const std::vector<std::pair<int, int>> changes = flush_volume_change_sequence(ids);
+        const std::vector<std::pair<int, int>> changes = flush_volume_change_sequence(ids, false);
 
         REQUIRE(changes.size() == n * (n - 1));
         CHECK(changes.front().first == ids.front());
@@ -150,8 +151,37 @@ TEST_CASE("Flush volume change sequence covers every pair as one chain", "[Calib
             CHECK(changes[i - 1].second == changes[i].first);
     }
 
-    CHECK(flush_volume_change_sequence({}).empty());
-    CHECK(flush_volume_change_sequence({2}).empty());
+    CHECK(flush_volume_change_sequence({}, false).empty());
+    CHECK(flush_volume_change_sequence({2}, false).empty());
+}
+
+TEST_CASE("Flush volume reference towers follow the first change into each filament", "[Calib]")
+{
+    const std::vector<int> ids     = GENERATE(std::vector<int>{1, 2}, std::vector<int>{1, 3, 6}, std::vector<int>{1, 2, 3, 4, 5});
+    const size_t           n       = ids.size();
+    CAPTURE(n);
+    const std::vector<std::pair<int, int>> changes = flush_volume_change_sequence(ids, true);
+
+    REQUIRE(changes.size() == n * n);
+    CHECK(changes.front() == std::make_pair(ids.front(), ids.front()));
+    for (size_t i = 1; i < changes.size(); ++i)
+        CHECK(changes[i - 1].second == changes[i].first);
+
+    // Leaving the references out gives the sequence without them.
+    std::vector<std::pair<int, int>> without_references;
+    std::set<int>                    seen;
+    for (const auto &[from, to] : changes) {
+        if (from != to) {
+            without_references.emplace_back(from, to);
+            continue;
+        }
+        CHECK(seen.insert(from).second);
+        // The reference comes right after the first change into its filament.
+        CHECK(std::count_if(without_references.begin(), without_references.end(), [to = to](const auto &c) { return c.second == to; }) ==
+              (to == ids.front() ? 0 : 1));
+    }
+    CHECK(seen.size() == n);
+    CHECK(without_references == flush_volume_change_sequence(ids, false));
 }
 
 TEST_CASE("Flush volume grid fills the bed row by row and avoids excluded areas", "[Calib]")
@@ -207,6 +237,24 @@ TEST_CASE("Flush volume grid fills the bed row by row and avoids excluded areas"
         CHECK(cells.size() < 3 * 4);
         for (const Vec2d &cell : cells)
             CHECK((cell.cwiseAbs() + footprint / 2).norm() <= 100.);
+    }
+
+    SECTION("fewer cells than the grid holds")
+    {
+        // The full grid has 4 columns, so 6 cells take a row of 4 and a row of 2, each centred.
+        const std::vector<Vec2d> cells = flush_volume_grid_cells(rectangle(0., 0., 235., 235.), {}, footprint, pitch, 5., 6);
+        REQUIRE(cells.size() == 6);
+        CHECK_THAT(cells[0].y(), Catch::Matchers::WithinAbs(cells[3].y(), 1e-6));
+        CHECK(cells[3].y() < cells[4].y());
+        CHECK_THAT(cells[4].y(), Catch::Matchers::WithinAbs(cells[5].y(), 1e-6));
+        CHECK_THAT((cells[0].y() + cells[4].y()) / 2, Catch::Matchers::WithinAbs(117.5, 1e-6));
+        CHECK_THAT((cells[0].x() + cells[3].x()) / 2, Catch::Matchers::WithinAbs(117.5, 1e-6));
+        CHECK_THAT((cells[4].x() + cells[5].x()) / 2, Catch::Matchers::WithinAbs(117.5, 1e-6));
+
+        const std::vector<Vec2d> row = flush_volume_grid_cells(rectangle(0., 0., 235., 235.), {}, footprint, pitch, 5., 3);
+        REQUIRE(row.size() == 3);
+        CHECK_THAT(row[1].x(), Catch::Matchers::WithinAbs(117.5, 1e-6));
+        CHECK_THAT(row[1].y(), Catch::Matchers::WithinAbs(117.5, 1e-6));
     }
 
     SECTION("bed smaller than one cell")
