@@ -8,6 +8,9 @@
 #include "GCodeWriter.hpp"
 #include "GCode/GCodeProcessor.hpp"
 #include "CustomGCode.hpp"
+#include "Emboss.hpp"
+#include "TextConfiguration.hpp"
+#include "Utils.hpp"
 #include "Model.hpp"
 #include "TriangleMesh.hpp"
 #include "GCode.hpp"
@@ -118,13 +121,57 @@ Vec2d flush_volume_tower_size(double volume_per_mm, const Flow &flow)
     return Vec2d(loop_length / 3., loop_length / 6.) + Vec2d::Constant(flow.width());
 }
 
-void add_flush_volume_parts(ModelObject &object, int from, int to, const Vec2d &tower_size, double tower_height, const Flow &flow)
+std::string flush_volume_label_text(double min_flush, double volume_per_mm)
 {
-    const Vec2d  base_size = tower_size + Vec2d::Constant(2 * flush_volume_base_margin);
+    // Whole numbers drop the decimal point, the others keep one decimal.
+    const auto number = [](double value) {
+        std::ostringstream out;
+        const double       rounded = std::round(value * 10.) / 10.;
+        out << std::fixed << std::setprecision(rounded == std::round(rounded) ? 0 : 1) << rounded;
+        return out.str();
+    };
+    return number(min_flush) + "+" + number(volume_per_mm) + "/mm";
+}
+
+TriangleMesh flush_volume_label_mesh(const std::string &text, double layer_height)
+{
+    const double depth = 3 * layer_height;
+    Emboss::FontFileWithCache font(Emboss::create_font_file((resources_dir() + "/fonts/HarmonyOS_Sans_SC_Bold.ttf").c_str()));
+    if (!font.has_value())
+        return {};
+    // The size is the line height; digits take about 70 % of it.
+    const FontProp   prop(float(flush_volume_label_height / 0.7));
+    const ExPolygons shapes = Emboss::text2shapes(font, text.c_str(), prop).expolygons;
+    if (shapes.empty())
+        return {};
+    // Shapes are in font units; ProjectScale turns them into mm.
+    const double                 scale = Emboss::get_text_shape_scale(prop, *font.font_file);
+    const Emboss::ProjectScale   project(std::make_unique<Emboss::ProjectZ>(depth / scale), scale);
+    TriangleMesh                 mesh(Emboss::polygons2model(shapes, project));
+    const BoundingBoxf3          bb = mesh.bounding_box();
+    mesh.translate(-float(bb.center().x()), -float(bb.center().y()), -float(bb.min.z()));
+    return mesh;
+}
+
+Vec2d flush_volume_base_size(const Vec2d &tower_size, const TriangleMesh &label)
+{
+    if (label.empty())
+        return tower_size + Vec2d::Constant(2 * flush_volume_base_margin);
+    const Vec3d label_size = label.bounding_box().size();
+    return Vec2d(std::max(tower_size.x(), label_size.x()), tower_size.y() + flush_volume_base_margin + label_size.y()) +
+           Vec2d::Constant(2 * flush_volume_base_margin);
+}
+
+void add_flush_volume_parts(ModelObject &object, int from, int to, const Vec2d &tower_size, double tower_height, const Flow &flow,
+                            const TriangleMesh &label)
+{
+    const Vec2d  base_size = flush_volume_base_size(tower_size, label);
     TriangleMesh base_mesh = make_cube(base_size.x(), base_size.y(), flush_volume_base_height);
     base_mesh.translate(-float(base_size.x() / 2), -float(base_size.y() / 2), 0.f);
+    // The tower stands at the back of the base, leaving the front for the label.
+    const double tower_y    = base_size.y() / 2 - flush_volume_base_margin - tower_size.y() / 2;
     TriangleMesh tower_mesh = make_cube(tower_size.x(), tower_size.y(), tower_height);
-    tower_mesh.translate(-float(tower_size.x() / 2), -float(tower_size.y() / 2), float(flush_volume_base_height));
+    tower_mesh.translate(-float(tower_size.x() / 2), float(tower_y - tower_size.y() / 2), float(flush_volume_base_height));
 
     // The base takes the object's filament.
     object.config.set_key_value("extruder", new ConfigOptionInt(from));
@@ -143,6 +190,14 @@ void add_flush_volume_parts(ModelObject &object, int from, int to, const Vec2d &
     tower->config.set_key_value("outer_wall_line_width", new ConfigOptionFloatOrPercent(flow.width(), false));
     tower->config.set_key_value("outer_wall_flow_ratio", new ConfigOptionFloat(1.));
     tower->config.set_key_value("fuzzy_skin", new ConfigOptionEnum<FuzzySkinType>(FuzzySkinType::None));
+
+    if (!label.empty()) {
+        const Vec3d  label_size = label.bounding_box().size();
+        const double label_y    = -base_size.y() / 2 + flush_volume_base_margin + label_size.y() / 2;
+        TriangleMesh label_mesh = label;
+        label_mesh.translate(0.f, float(label_y), float(flush_volume_base_height - label_size.z() * 2 / 3));
+        object.add_volume(std::move(label_mesh), ModelVolumeType::NEGATIVE_VOLUME, false)->name = "label";
+    }
 }
 
 // Calculate the optimal Pressure Advance speed

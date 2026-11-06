@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <sstream>
@@ -14,12 +15,14 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "libslic3r/Config.hpp"
+#include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Utils.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/libslic3r.h"
 #include "test_helpers.hpp"
@@ -174,7 +177,7 @@ TEST_CASE("The flushing volume tower holds the requested volume per mm for every
     const double tower_height = 10.;
     Model        model;
     ModelObject *object = model.add_object();
-    add_flush_volume_parts(*object, 1, 2, tower_size, tower_height, flow);
+    add_flush_volume_parts(*object, 1, 2, tower_size, tower_height, flow, {});
     object->add_instance()->set_offset(Vec3d(100., 100., 0.));
     Print print;
     print.apply(model, config);
@@ -197,4 +200,61 @@ TEST_CASE("The flushing volume tower holds the requested volume per mm for every
         ++tower_layers;
     }
     CHECK(tower_layers > 0);
+}
+
+TEST_CASE("The label engraved into the flushing volume base adds no filament change", "[Calib]")
+{
+    // The label font is a bundled resource.
+    const std::string previous_resources = resources_dir();
+    set_resources_dir(std::string(PROFILES_DIR) + "/..");
+    const double       layer_height = 0.2;
+    DynamicPrintConfig config       = Test::multifilament_config(2, {
+        {"layer_height", std::to_string(layer_height)},
+        {"initial_layer_print_height", std::to_string(layer_height)},
+        {"enable_prime_tower", 0},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+    });
+    const Flow         flow       = flush_volume_tower_flow(config);
+    const Vec2d        tower_size = flush_volume_tower_size(20., flow);
+    const TriangleMesh label      = flush_volume_label_mesh(flush_volume_label_text(50., 20.), flow.height());
+    set_resources_dir(previous_resources);
+    REQUIRE_FALSE(label.empty());
+    const Vec2d base_size = flush_volume_base_size(tower_size, label);
+    // The label sits in front of the tower, so the base is deeper than the tower and the label together.
+    CHECK(base_size.y() > tower_size.y() + label.bounding_box().size().y());
+
+    Model        model;
+    ModelObject *object = model.add_object();
+    add_flush_volume_parts(*object, 1, 2, tower_size, 5., flow, label);
+    object->add_instance()->set_offset(Vec3d(100., 100., 0.));
+    Print print;
+    print.apply(model, config);
+    const std::string gcode = Test::gcode(print);
+
+    // The label is cut into the top of the base: its last layer covers less than the whole base.
+    const PrintObject &print_object = *print.objects().front();
+    const Layer       *base_top     = nullptr;
+    for (const Layer *layer : print_object.layers())
+        if (layer->print_z < flush_volume_base_height + EPSILON)
+            base_top = layer;
+    REQUIRE(base_top != nullptr);
+    double area = 0.;
+    for (const ExPolygon &slice : base_top->lslices)
+        area += slice.area();
+    CHECK(unscaled(unscaled(area)) < 0.98 * base_size.x() * base_size.y());
+
+    // The base prints in T0 and the tower in T1, with one change between them.
+    std::istringstream lines(gcode);
+    std::string        line;
+    std::string        tool;
+    int                changes = 0;
+    while (std::getline(lines, line))
+        if (line.size() > 1 && line[0] == 'T' && std::isdigit(static_cast<unsigned char>(line[1]))) {
+            const std::string next = line.substr(0, line.find_first_of(" ;"));
+            if (!tool.empty() && next != tool)
+                ++changes;
+            tool = next;
+        }
+    CHECK(changes == 1);
 }

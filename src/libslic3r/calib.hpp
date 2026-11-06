@@ -14,6 +14,7 @@
 #include "PrintConfig.hpp"
 #include "BoundingBox.hpp"
 #include "CustomGCode.hpp"
+#include "TriangleMesh.hpp"
 
 namespace Slic3r {
 
@@ -89,14 +90,28 @@ static constexpr double flush_volume_base_height = 1.6;
 // How far the base reaches past the tower on each side.
 static constexpr double flush_volume_base_margin = 0.8;
 
+// Text height of the label engraved into the front of the base.
+static constexpr double flush_volume_label_height = 3.5;
+
 // Flow of the tower's outer wall loop with the given print and printer config.
 Flow flush_volume_tower_flow(const DynamicPrintConfig &config);
 // Outer size of a tower whose loop, printed with flow, holds volume_per_mm of filament per mm of height.
 Vec2d flush_volume_tower_size(double volume_per_mm, const Flow &flow);
-// Adds the base, in filament from, and the tower on top of it, in filament to, centred on the object's origin. The
-// object takes the flow's layer height and the tower its line width, so the volume per mm does not change with the
-// print settings.
-void add_flush_volume_parts(ModelObject &object, int from, int to, const Vec2d &tower_size, double tower_height, const Flow &flow);
+// Label naming the test settings, read as the formula it stands for: "50+20/mm" for a minimum flush of 50 mm³ and a
+// tower volume per mm of 20 mm³/mm.
+std::string flush_volume_label_text(double min_flush, double volume_per_mm);
+// Mesh of text in the bundled font, centred on the origin, flush_volume_label_height tall and three layers thick from
+// z = 0: engraved into the base, it cuts two layers deep and reaches one layer above, so the base's top is cut
+// cleanly. Empty if the font cannot be read.
+TriangleMesh flush_volume_label_mesh(const std::string &text, double layer_height);
+// Outer size of the base under a tower of tower_size, with room in front of the tower for label when it is not empty.
+Vec2d flush_volume_base_size(const Vec2d &tower_size, const TriangleMesh &label);
+// Adds the base, in filament from, and the tower on top of it, in filament to, with the base centred on the object's
+// origin. The label is engraved into the base in front of the tower, so it adds no filament change. The object
+// takes the flow's layer height and the tower its line width, so the volume per mm does not change with the print
+// settings.
+void add_flush_volume_parts(ModelObject &object, int from, int to, const Vec2d &tower_size, double tower_height, const Flow &flow,
+                            const TriangleMesh &label);
 
 enum FlowRatioCalibrationType {
     COMPLETE_CALIBRATION = 0,

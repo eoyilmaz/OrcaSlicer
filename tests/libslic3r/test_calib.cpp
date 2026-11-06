@@ -184,6 +184,14 @@ TEST_CASE("Flush volume reference towers follow the first change into each filam
     CHECK(without_references == flush_volume_change_sequence(ids, false));
 }
 
+TEST_CASE("Flush volume label reads as minimum flush plus volume per mm", "[Calib]")
+{
+    CHECK(flush_volume_label_text(50., 20.) == "50+20/mm");
+    CHECK(flush_volume_label_text(100., 22.5) == "100+22.5/mm");
+    // Values are rounded to one decimal, and a whole number drops its decimal point.
+    CHECK(flush_volume_label_text(49.98, 17.04) == "50+17/mm");
+}
+
 TEST_CASE("Flush volume grid fills the bed row by row and avoids excluded areas", "[Calib]")
 {
     const Vec2d footprint(18.8, 11.);

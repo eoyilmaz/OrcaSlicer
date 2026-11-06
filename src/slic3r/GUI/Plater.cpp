@@ -18199,7 +18199,10 @@ bool Plater::calib_flush_volume(const std::vector<int>& filament_ids, double flu
 
     // Lay the objects out row by row from the front left corner, as far apart as by-object printing needs.
     // The skirt is turned off below, so it needs no room.
-    const Vec2d footprint = tower_size + Vec2d::Constant(2 * flush_volume_base_margin);
+    // Every base is engraved with the minimum flush and the tower volume per mm, so a tower still tells how to read it
+    // once it is off the plate.
+    const TriangleMesh label     = flush_volume_label_mesh(flush_volume_label_text(min_flush, volume_per_mm), flow.height());
+    const Vec2d        footprint = flush_volume_base_size(tower_size, label);
     const Vec2d pitch     = footprint + Vec2d::Constant(full_config.opt_float("extruder_clearance_radius") + 1.);
 
     Polygons excluded;
@@ -18269,7 +18272,7 @@ bool Plater::calib_flush_volume(const std::vector<int>& filament_ids, double flu
                         // It becomes a file name, so keep the underscore instead of a space.
                         format(_u8L("Reference_%1%"), from) :
                         format("%1%_to_%2%", from, to);
-        add_flush_volume_parts(*obj, from, to, tower_size, tower_height, flow);
+        add_flush_volume_parts(*obj, from, to, tower_size, tower_height, flow, label);
 
         int        plate_idx = int(i / cells.size());
         PartPlate* plate     = get_partplate_list().get_plate(plate_idx);

@@ -1217,7 +1217,7 @@ FlushVolume_Test_Dlg::FlushVolume_Test_Dlg(wxWindow* parent, wxWindowID id, Plat
 
     auto min_flush_sizer = new wxBoxSizer(wxHORIZONTAL);
     auto min_flush_text = new wxStaticText(this, wxID_ANY, min_flush_str, wxDefaultPosition, st_size, wxALIGN_LEFT);
-    m_tiMinFlush = new ::TextInput(this, std::to_string(100), _L("mm³"), "", wxDefaultPosition, FromDIP(wxSize(120, -1)));
+    m_tiMinFlush = new ::TextInput(this, std::to_string(50), _L("mm³"), "", wxDefaultPosition, FromDIP(wxSize(120, -1)));
     m_tiMinFlush->GetTextCtrl()->SetValidator(wxTextValidator(wxFILTER_NUMERIC));
     m_tiMinFlush->SetToolTip(_L("The volume flushed at every filament change before the tower starts, so the nozzle is primed and the "
                                 "tower prints reliably. Add it to the volume you measure on the tower."));
